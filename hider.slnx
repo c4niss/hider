@@ -1,0 +1,7 @@
+<Solution>
+  <Configurations>
+    <Platform Name="x64" />
+    <Platform Name="x86" />
+  </Configurations>
+  <Project Path="hider/hider.vcxproj" Id="7a8e1829-148f-4594-8d9a-c5d243f7194b" />
+</Solution>
