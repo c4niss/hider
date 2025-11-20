@@ -1,0 +1,11 @@
+=== PROCESS_CHILD.EXE DÉMARRÉ ===
+PID: 6876
+process_child.exe actif depuis 0 secondes. PID: 6876
+process_child.exe actif depuis 30 secondes. PID: 6876
+process_child.exe actif depuis 60 secondes. PID: 6876
+process_child.exe actif depuis 90 secondes. PID: 6876
+process_child.exe actif depuis 120 secondes. PID: 6876
+process_child.exe actif depuis 150 secondes. PID: 6876
+process_child.exe actif depuis 180 secondes. PID: 6876
+process_child.exe actif depuis 210 secondes. PID: 6876
+process_child.exe actif depuis 240 secondes. PID: 6876
